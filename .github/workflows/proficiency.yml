@@ -1,0 +1,69 @@
+name: Context assessment
+on:
+  push:
+    branches: [replacement-proficiency-01]
+    paths: [.github/proficiency-ready]
+permissions:
+  contents: read
+jobs:
+  assess:
+    if: github.repository == 'mohanad-hafez/proficiency-assessment-checks'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s .github/proficiency -p test_proficiency_comment.py -v
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: pskoett/measuring-ai-proficiency
+          ref: 9ba0721f1b9ce22b1331eaaa8712f72732d91228
+          path: native-source
+          persist-credentials: false
+      - name: Install native source
+        working-directory: native-source
+        run: |
+          python3 -m pip install --user -e '.[dev]' 'mcp==1.25.0'
+          python3 -m pip freeze > ../dependencies.txt
+      - name: Native test suite
+        working-directory: native-source
+        run: python3 -m pytest tests/ -v > ../native-tests.log 2>&1
+      - name: Native assessment
+        working-directory: native-source
+        run: |
+          measure-ai-proficiency --format json --output ../proficiency-report.json
+          measure-ai-proficiency --format markdown --output ../proficiency-report.md
+          git diff --exit-code
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const files=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:1,per_page:100});
+            require('fs').writeFileSync('pr-changes.json',JSON.stringify(files.map(x=>({filename:x.filename,status:x.status})),null,2));
+      - run: python3 .github/proficiency/proficiency_comment.py
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const fs=require('fs');const pr=await github.rest.pulls.get({...context.repo,pull_number:1});
+            if(pr.data.state!=='open'||pr.data.head.sha!=='f0a546db6607843709cd8fd3863134b1e4af7e69')throw Error('Target changed');
+            const body=fs.readFileSync('assessment-comment.md','utf8');
+            fs.writeFileSync('assessment-prepublication.json',JSON.stringify({body,delivery:'not_attempted'},null,2));
+            const comment=await github.rest.issues.createComment({...context.repo,issue_number:1,body});
+            fs.writeFileSync('publication.json',JSON.stringify({id:comment.data.id,url:comment.data.html_url,body},null,2));
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: proficiency-result
+          path: |
+            proficiency-report.json
+            proficiency-report.md
+            assessment-comment.md
+            assessment-prepublication.json
+            publication.json
+            pr-changes.json
+            native-tests.log
+            dependencies.txt
+          retention-days: 14
