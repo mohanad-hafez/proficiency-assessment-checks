@@ -1,7 +1,7 @@
 name: Matched context assessment
 on:
   push:
-    branches: [matched-proficiency-01]
+    branches: [matched-proficiency-repair-01]
 permissions:
   contents: read
 jobs:
@@ -78,6 +78,19 @@ jobs:
               --allow-tool=fixture --no-ask-user --no-color --silent \
               --prompt "$(cat .github/proficiency/prompt.md)" > evidence/output.txt 2> evidence/diagnostics.txt
             node -e 'const f=require("fs");const c=f.readFileSync("evidence/tools.jsonl","utf8").trim().split("\n").map(JSON.parse);if(c.some(x=>x.error)||c.at(-1).name!=="publish_result")throw Error("Missing assessment");f.writeFileSync("evidence/assessment-comment.md",c.at(-1).args.body)'
+          fi
+          if [ "$ARM" = agent ] && ! python3 .github/proficiency/validate_assessment.py > evidence/first-validation.log 2>&1; then
+            mv evidence/tools.jsonl evidence/tools-initial.jsonl
+            cp evidence/assessment-comment.md evidence/initial-comment.md
+            cat .github/proficiency/prompt.md > repair-prompt.md
+            printf "\n\nThe initial report failed validation. Re-read all three inputs and use the exact three-row metric table and headings from the template. Include Files Detected as the sum of all level file counts. Keep correct details and submit the entire corrected comment.\n\nInitial draft for repair:\n" >> repair-prompt.md
+            cat evidence/initial-comment.md >> repair-prompt.md
+            timeout 180s copilot --disable-builtin-mcps --disable-client-telemetry \
+              --additional-mcp-config=@fixture-mcp.json \
+              --available-tools=fixture-read_input,fixture-publish_result \
+              --allow-tool=fixture --no-ask-user --no-color --silent \
+              --prompt "$(cat repair-prompt.md)" > evidence/repair-output.txt 2> evidence/repair-diagnostics.txt
+            node -e 'const f=require("fs");const c=f.readFileSync("evidence/tools.jsonl","utf8").trim().split("\n").map(JSON.parse);if(c.some(x=>x.error)||c.at(-1).name!=="publish_result")throw Error("Missing corrected assessment");f.writeFileSync("evidence/assessment-comment.md",c.at(-1).args.body)'
           fi
           python3 .github/proficiency/validate_assessment.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
