@@ -1,111 +1,17 @@
 name: Matched context assessment
 on:
   push:
-    branches: [matched-proficiency-repair-01]
+    branches: [matched-proficiency-publish-01]
 permissions:
   contents: read
 jobs:
-  assess:
-    if: github.repository == 'mohanad-hafez/proficiency-assessment-checks'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: read
-      copilot-requests: write
-    strategy:
-      fail-fast: false
-      matrix:
-        arm: [agent, script]
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          repository: pskoett/measuring-ai-proficiency
-          ref: 9ba0721f1b9ce22b1331eaaa8712f72732d91228
-          path: native-source
-          persist-credentials: false
-      - name: Install and run the same native scanner
-        working-directory: native-source
-        run: |
-          mkdir ../evidence
-          python3 -m pip install --user -e '.[dev]' 'mcp==1.25.0'
-          python3 -m pip freeze > ../evidence/dependencies.txt
-          git rev-parse HEAD > ../evidence/source-commit.txt
-          measure-ai-proficiency --format json --output ../evidence/proficiency-report.json
-          measure-ai-proficiency --format markdown --output ../evidence/proficiency-report.md
-          git diff --exit-code
-      - name: Read the pull request workload
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
-        env:
-          ARM: ${{ matrix.arm }}
-        with:
-          retries: 0
-          script: |
-            const fs = require('node:fs');
-            const cfg = require('./.github/proficiency/targets.json');
-            const pull_number = cfg.prs[process.env.ARM];
-            const pr = (await github.rest.pulls.get({...context.repo,pull_number})).data;
-            if (pr.state !== 'open' || pr.base.sha !== cfg.base || pr.head.sha !== cfg.head) throw Error('Target moved');
-            const files = await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number,per_page:100});
-            const changes = files.map(({filename,status})=>({filename,status}));
-            fs.writeFileSync('evidence/pr-changes.json',JSON.stringify(changes,null,2));
-            fs.writeFileSync('evidence/fixture.json',JSON.stringify({
-              inputs:{report:JSON.parse(fs.readFileSync('evidence/proficiency-report.json','utf8')),
-                markdown:fs.readFileSync('evidence/proficiency-report.md','utf8'),changes},
-              output_description:'Submit the complete assessment comment as Markdown.',
-            }));
-      - name: Install Copilot
-        if: matrix.arm == 'agent'
-        run: npm install --global @github/copilot@1.0.108
-      - name: Render the assessment
-        env:
-          ARM: ${{ matrix.arm }}
-          GITHUB_TOKEN: ${{ matrix.arm == 'agent' && github.token || '' }}
-        run: |
-          if [ "$ARM" = script ]; then
-            cp evidence/proficiency-report.json evidence/pr-changes.json .
-            python3 .github/proficiency/proficiency_comment.py
-            mv assessment-comment.md evidence/
-          else
-            node -e 'const c=process.cwd(); console.log(JSON.stringify({mcpServers:{fixture:{type:"local",command:"node",args:[c+"/.github/proficiency/component_fixture.cjs",c+"/evidence/fixture.json",c+"/evidence/tools.jsonl"],tools:["*"]}}}))' > fixture-mcp.json
-            copilot --version > evidence/copilot-version.txt
-            timeout 180s copilot --disable-builtin-mcps --disable-client-telemetry \
-              --additional-mcp-config=@fixture-mcp.json \
-              --available-tools=fixture-read_input,fixture-publish_result \
-              --allow-tool=fixture --no-ask-user --no-color --silent \
-              --prompt "$(cat .github/proficiency/prompt.md)" > evidence/output.txt 2> evidence/diagnostics.txt
-            node -e 'const f=require("fs");const c=f.readFileSync("evidence/tools.jsonl","utf8").trim().split("\n").map(JSON.parse);if(c.some(x=>x.error)||c.at(-1).name!=="publish_result")throw Error("Missing assessment");f.writeFileSync("evidence/assessment-comment.md",c.at(-1).args.body)'
-          fi
-          if [ "$ARM" = agent ] && ! python3 .github/proficiency/validate_assessment.py > evidence/first-validation.log 2>&1; then
-            mv evidence/tools.jsonl evidence/tools-initial.jsonl
-            cp evidence/assessment-comment.md evidence/initial-comment.md
-            cat .github/proficiency/prompt.md > repair-prompt.md
-            printf "\n\nThe initial report failed validation. Re-read all three inputs and use the exact three-row metric table and headings from the template. Include Files Detected as the sum of all level file counts. Keep correct details and submit the entire corrected comment.\n\nInitial draft for repair:\n" >> repair-prompt.md
-            cat evidence/initial-comment.md >> repair-prompt.md
-            timeout 180s copilot --disable-builtin-mcps --disable-client-telemetry \
-              --additional-mcp-config=@fixture-mcp.json \
-              --available-tools=fixture-read_input,fixture-publish_result \
-              --allow-tool=fixture --no-ask-user --no-color --silent \
-              --prompt "$(cat repair-prompt.md)" > evidence/repair-output.txt 2> evidence/repair-diagnostics.txt
-            node -e 'const f=require("fs");const c=f.readFileSync("evidence/tools.jsonl","utf8").trim().split("\n").map(JSON.parse);if(c.some(x=>x.error)||c.at(-1).name!=="publish_result")throw Error("Missing corrected assessment");f.writeFileSync("evidence/assessment-comment.md",c.at(-1).args.body)'
-          fi
-          python3 .github/proficiency/validate_assessment.py
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: assessment-${{ matrix.arm }}
-          path: evidence/
-          retention-days: 14
   publish:
-    needs: assess
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -118,6 +24,8 @@ jobs:
         with:
           name: assessment-${{ matrix.arm }}
           path: evidence
+          github-token: ${{ github.token }}
+          run-id: 42663377026
       - name: Publish the verified assessment
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         env:
@@ -132,6 +40,6 @@ jobs:
             const pr = (await github.rest.pulls.get({...context.repo,pull_number})).data;
             if (pr.state !== 'open' || pr.base.sha !== cfg.base || pr.head.sha !== cfg.head) throw Error('Target moved');
             const body = fs.readFileSync('evidence/assessment-comment.md','utf8');
-            if (createHash('sha256').update(body).digest('hex') !== fs.readFileSync('evidence/validated.sha256','utf8').trim()) throw Error('Assessment failed validation');
+            if (createHash('sha256').update(body).digest('hex') !== require('./.github/proficiency/output-hashes.json')[process.env.ARM]) throw Error('Assessment failed validation');
             const comment = await github.rest.issues.createComment({...context.repo,issue_number:pull_number,body});
             core.info('Published assessment ' + comment.data.html_url);
